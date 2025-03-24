@@ -502,10 +502,19 @@ Final Answer: [final answer]
 app = FastAPI(title="ToolLLM POC")
 tool_llm = ToolLLM()
 
+class ChatRequest(BaseModel):
+    message: str
+
 @app.post("/chat")
-async def chat(request: ToolRequest):
-    response = await tool_llm.process_query(request)
-    return {"response": response}
+async def chat(request: ChatRequest):
+    """Process a chat message"""
+    # Convert ChatRequest to ToolRequest
+    tool_request = ToolRequest(
+        query=request.message,
+        tools=[],
+        max_steps=5
+    )
+    return await tool_llm.process_query(tool_request)
 
 @app.get("/tools")
 async def get_tools():
