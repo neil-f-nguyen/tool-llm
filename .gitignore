@@ -1,0 +1,8 @@
+# pyenv
+.venv
+
+# env
+.env
+
+# pycache
+__pycache__/

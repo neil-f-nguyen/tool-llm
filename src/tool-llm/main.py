@@ -1,6 +1,6 @@
 from typing import List, Dict, Any, Optional, Callable, Union
 from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 from openai import AzureOpenAI
 import os
 from dotenv import load_dotenv
@@ -90,7 +90,7 @@ class SemanticParser:
             "weather": r"(weather|temperature|forecast)\s+(in|at|for)\s+([a-zA-Z\s,]+)(?:\s+on\s+(\d{4}-\d{2}-\d{2}))?",
             "wikipedia": r"(what is|who is|tell me about|search for)\s+([a-zA-Z\s,]+)",
             "news": r"(news|latest news|recent news)\s+(about|on|regarding)\s+([a-zA-Z\s,]+)",
-            "currency": r"(convert|change)\s+(\d+)\s+([A-Z]{3})\s+(to|in)\s+([A-Z]{3})"
+            "currency": r"(convert|change)\s+(\d+(?:\.\d+)?)\s+([A-Z]{3})\s+(?:to|in|into)\s+([A-Z]{3})"
         }
     
     def parse_query(self, query: str) -> Dict[str, Any]:
@@ -168,6 +168,23 @@ class ToolExecutor:
                                     weather_data = await weather_response.json()
                                     return self._format_weather_response(weather_data, location["name"])
             
+            # Special handling for currency API
+            elif tool.name == "currency":
+                # Construct the currency API URL with the correct parameters
+                currency_url = f"{tool.api_endpoint}?amount={tool_input['amount']}&from={tool_input['from_currency']}&to={tool_input['to_currency']}"
+                async with self.session.get(currency_url, headers=headers) as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        return self._format_api_response(tool.name, {
+                            "amount": tool_input["amount"],
+                            "base": tool_input["from_currency"],
+                            "rates": {
+                                tool_input["to_currency"]: data["rates"][tool_input["to_currency"]]
+                            }
+                        })
+                    else:
+                        return f"Error: Currency conversion failed with status {response.status}"
+            
             # Make the request for other APIs
             async with self.session.request(
                 method=tool.api_method,
@@ -236,14 +253,37 @@ class ToolExecutor:
         
         return str(data)  # Default formatting for other APIs
 
+    async def _execute_database(self, tool: Tool, tool_input: Dict[str, Any]) -> Any:
+        """Execute database-based tool"""
+        if tool.name == "wikipedia":
+            try:
+                # Search Wikipedia
+                search_results = wikipedia.search(tool_input["query"])
+                if search_results:
+                    # Get the first result's page
+                    page = wikipedia.page(search_results[0], auto_suggest=False)
+                    # Return summary
+                    return page.summary
+                return "No results found on Wikipedia."
+            except wikipedia.exceptions.DisambiguationError as e:
+                # Handle disambiguation pages
+                return f"Multiple matches found. Please be more specific. Options include: {', '.join(e.options[:5])}"
+            except wikipedia.exceptions.PageError:
+                return "No Wikipedia page found for this query."
+            except Exception as e:
+                return f"Error searching Wikipedia: {str(e)}"
+        else:
+            raise ValueError(f"Unsupported database tool: {tool.name}")
+
 class ToolLLM:
     """Class to handle ToolLLM operations"""
     
     def __init__(self):
         self.client = AzureOpenAI(
             api_key=os.getenv("AZURE_OPENAI_API_KEY"),
-            api_version="2024-02-15-preview",
-            azure_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT")
+            api_version=os.getenv("AZURE_OPENAI_API_VERSION"),
+            azure_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT"),
+            azure_deployment=os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME")
         )
         self.registry = ToolRegistry()
         self.parser = SemanticParser()
@@ -460,19 +500,20 @@ Final Answer: [final answer]
                         "date": matches[3] if matches[3] else None
                     }
                 elif tool_name == "wikipedia":
+                    # Extract the query from matches[1] which contains the query text
                     tool_input = {
-                        "query": matches[2]
+                        "query": matches[1]
                     }
                 elif tool_name == "news":
                     tool_input = {
                         "topic": matches[2],
-                        "count": int(matches[3]) if matches[3] else 5
+                        "count": 5
                     }
                 elif tool_name == "currency":
                     tool_input = {
                         "amount": float(matches[1]),
                         "from_currency": matches[2],
-                        "to_currency": matches[3]
+                        "to_currency": matches[3]  # Changed from matches[4] to matches[3]
                     }
                 
                 # Execute the tool directly
@@ -508,10 +549,10 @@ class ChatRequest(BaseModel):
 @app.post("/chat")
 async def chat(request: ChatRequest):
     """Process a chat message"""
-    # Convert ChatRequest to ToolRequest
+    # Convert ChatRequest to ToolRequest with all available tools
     tool_request = ToolRequest(
         query=request.message,
-        tools=[],
+        tools=list(tool_llm.registry.tools.values()),  # Include all registered tools
         max_steps=5
     )
     return await tool_llm.process_query(tool_request)
