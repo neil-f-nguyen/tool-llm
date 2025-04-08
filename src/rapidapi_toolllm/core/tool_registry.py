@@ -3,6 +3,7 @@ from src.rapidapi_toolllm.models.tool import Tool, ToolResponse
 import httpx
 import os
 from dotenv import load_dotenv
+from src.rapidapi_toolllm.core.azure_gpt import AzureGPTIntegration
 
 load_dotenv()
 
@@ -10,7 +11,9 @@ class ToolRegistry:
     def __init__(self):
         self.tools: Dict[str, Tool] = {}
         self.rapidapi_key = os.getenv("RAPIDAPI_KEY")
+        self.azure_gpt = AzureGPTIntegration()
         self._register_default_tools()
+        self._register_tools_with_azure_gpt()
 
     def _register_default_tools(self):
         # Register Weather API Tool using Open Weather API
@@ -158,6 +161,24 @@ class ToolRegistry:
             ]
         ))
 
+    def _register_tools_with_azure_gpt(self):
+        """
+        Register all tools with Azure GPT for LLM-based tool selection
+        """
+        for tool_name, tool in self.tools.items():
+            # Create a function that will be called by the agent
+            async def create_tool_function(tool_name=tool_name):
+                async def tool_function(**kwargs):
+                    return await self.execute_tool(tool_name, kwargs)
+                return tool_function
+            
+            # Register the tool with Azure GPT
+            self.azure_gpt.register_tool(
+                tool_name=tool_name,
+                tool_description=tool.description,
+                tool_function=create_tool_function(tool_name)
+            )
+
     def register_tool(self, tool: Tool):
         self.tools[tool.name] = tool
 
@@ -221,4 +242,10 @@ class ToolRegistry:
                 success=False,
                 data=None,
                 error=str(e)
-            ) 
+            )
+            
+    async def process_with_azure_gpt(self, query: str) -> Dict[str, Any]:
+        """
+        Process a query using Azure GPT for tool selection and execution
+        """
+        return await self.azure_gpt.process_query(query) 

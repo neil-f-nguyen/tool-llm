@@ -1,6 +1,6 @@
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 import os
 from dotenv import load_dotenv
 from src.rapidapi_toolllm.core.tool_registry import ToolRegistry
@@ -19,11 +19,12 @@ semantic_parser = SemanticParser()
 
 class ChatRequest(BaseModel):
     message: str
+    use_llm: bool = False  # Flag to use LLM-based processing
 
 class ChatResponse(BaseModel):
-    tool_name: str
-    parameters: Dict[str, Any]
-    response: ToolResponse
+    tool_name: Optional[str] = None
+    parameters: Optional[Dict[str, Any]] = None
+    response: Any
     reasoning: str
 
 @app.post("/chat", response_model=ChatResponse)
@@ -31,24 +32,41 @@ async def chat(request: ChatRequest):
     """
     Process a chat message and execute appropriate tool
     """
-    # Parse the query
-    tool_name, parameters = semantic_parser.parse(request.message)
-    
-    if not tool_name:
-        raise HTTPException(
-            status_code=400,
-            detail="Could not understand the query. Please try rephrasing."
+    if request.use_llm:
+        # Use Azure GPT for processing
+        result = await tool_registry.process_with_azure_gpt(request.message)
+        
+        if not result["success"]:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Error processing with Azure GPT: {result.get('error', 'Unknown error')}"
+            )
+            
+        return ChatResponse(
+            tool_name=None,  # Multiple tools might be used
+            parameters=None,  # Parameters are handled by the LLM
+            response=result["response"],
+            reasoning=result["reasoning"]
         )
+    else:
+        # Use traditional regex-based parsing
+        tool_name, parameters = semantic_parser.parse(request.message)
+        
+        if not tool_name:
+            raise HTTPException(
+                status_code=400,
+                detail="Could not understand the query. Please try rephrasing."
+            )
 
-    # Execute the tool
-    response = await tool_registry.execute_tool(tool_name, parameters)
-    
-    return ChatResponse(
-        tool_name=tool_name,
-        parameters=parameters,
-        response=response,
-        reasoning=f"Query matched {tool_name} tool with parameters: {parameters}"
-    )
+        # Execute the tool
+        response = await tool_registry.execute_tool(tool_name, parameters)
+        
+        return ChatResponse(
+            tool_name=tool_name,
+            parameters=parameters,
+            response=response,
+            reasoning=f"Query matched {tool_name} tool with parameters: {parameters}"
+        )
 
 @app.get("/tools", response_model=List[Tool])
 async def list_tools():
@@ -64,6 +82,13 @@ async def register_tool(tool: Tool):
     """
     tool_registry.register_tool(tool)
     return tool
+
+@app.get("/health")
+async def health_check():
+    """
+    Health check endpoint
+    """
+    return {"status": "healthy"}
 
 if __name__ == "__main__":
     import uvicorn
