@@ -3,6 +3,7 @@ from src.rapidapi_toolllm.models.tool import Tool, ToolResponse
 import httpx
 import os
 from dotenv import load_dotenv
+from src.rapidapi_toolllm.core.lam_integration import LAMIntegration
 
 load_dotenv()
 
@@ -10,7 +11,9 @@ class ToolRegistry:
     def __init__(self):
         self.tools: Dict[str, Tool] = {}
         self.rapidapi_key = os.getenv("RAPIDAPI_KEY")
+        self.lam = LAMIntegration()
         self._register_default_tools()
+        self._register_tools_with_lam()
 
     def _register_default_tools(self):
         # Register Weather API Tool using Open Weather API
@@ -158,6 +161,24 @@ class ToolRegistry:
             ]
         ))
 
+    def _register_tools_with_lam(self):
+        """
+        Register all tools with LAM for advanced processing
+        """
+        for tool_name, tool in self.tools.items():
+            # Create a function that will be called by the agent
+            async def create_tool_function(tool_name=tool_name):
+                async def tool_function(**kwargs):
+                    return await self.execute_tool(tool_name, kwargs)
+                return tool_function
+            
+            # Register the tool with LAM
+            self.lam.register_tool(
+                tool_name=tool_name,
+                tool_description=tool.description,
+                tool_function=create_tool_function(tool_name)
+            )
+
     def register_tool(self, tool: Tool):
         self.tools[tool.name] = tool
 
@@ -221,4 +242,13 @@ class ToolRegistry:
                 success=False,
                 data=None,
                 error=str(e)
-            ) 
+            )
+            
+    async def process_with_lam(self, query: str, use_autogen: bool = False) -> Dict[str, Any]:
+        """
+        Process a query using LAM (LangChain or AutoGen)
+        """
+        if use_autogen:
+            return await self.lam.process_with_autogen(query)
+        else:
+            return await self.lam.process_with_langchain(query) 
